@@ -1,0 +1,40 @@
+name: nuget-map-rid
+description: Map RID to NuGet RuntimeIdentifier
+inputs:
+  rid:
+    description: 'Input RID'
+    required: true
+outputs:
+  nuget_rid:
+    description: 'Mapped NuGet RID or empty'
+runs:
+  using: 'composite'
+  steps:
+    - id: map
+      shell: bash
+      run: |
+        in="${{ inputs.rid }}"
+        in="$(echo "$in" | tr '[:upper:]' '[:lower:]')"
+        IFS=',' read -ra _rids <<< "$in"
+        out_arr=()
+        for _rid in "${_rids[@]}"; do
+          _rid="$(echo "$_rid" | xargs)"
+          _out=""
+          case "$_rid" in
+            linux-x86_64-linux-gnu|linux-amd64) _out="linux-x64" ;;
+            linux-aarch64-linux-gnu|linux-arm64) _out="linux-arm64" ;;
+            linux-armv7-linux-gnueabihf) _out="linux-arm" ;;
+            win-arm64|windows-arm64) _out="win-arm64" ;;
+            win-x64|windows-x64|windows-amd64) _out="win-x64" ;;
+            win-x86|windows-x86|windows-i386) _out="win-x86" ;;
+            linux-x86_64-alpine-linux-musl) _out="linux-musl-x64" ;;
+            linux-aarch64-alpine-linux-musl) _out="linux-musl-arm64" ;;
+            macos-arm64|osx-arm64) _out="osx-arm64" ;;
+            macos-x64|osx-x64|macos-x86_64|macos-amd64|osx-amd64) _out="osx-x64" ;;
+          esac
+          if [ -n "$_out" ]; then
+            out_arr+=("$_out")
+          fi
+        done
+        mapped="$(IFS=','; echo "${out_arr[*]}")"
+        echo "nuget_rid=$mapped" >> $GITHUB_OUTPUT

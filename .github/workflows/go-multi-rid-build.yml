@@ -1,0 +1,123 @@
+name: go-multi-rid-build
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        type: string
+        required: true
+      build_targets:
+        type: string
+        required: true
+      go_version:
+        type: string
+        required: false
+        default: "1.22"
+      debug_symbols:
+        type: string
+        required: false
+        default: "false"
+
+env:
+  PROJECT_NAME: ${{ inputs.project_name }}
+  ARTIFACTS_DIR: artifacts
+  BUILD_TARGETS: ${{ inputs.build_targets }}
+  GO_VERSION: ${{ inputs.go_version }}
+  LDFLAGS: ${{ inputs.debug_symbols == 'true' && '-ldflags="-s -w"' || '' }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [ amd64, arm64 ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:ARTIFACTS_DIR
+          $outDir = Join-Path $env:GITHUB_WORKSPACE $env:ARTIFACTS_DIR
+          $env:GOOS = "windows"
+          $env:GOARCH = "${{ matrix.arch }}"
+          foreach ($tRaw in $env:BUILD_TARGETS.Split(',')) {
+            $dir = "$($tRaw.Trim())"
+            $abs = Resolve-Path $dir
+            Push-Location $abs
+            if ($env:LDFLAGS) {
+              go build -o "$outDir/" $env:LDFLAGS .
+            } else {
+              go build -o "$outDir/" .
+            }
+            Pop-Location
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROJECT_NAME }}-win-${{ matrix.arch }}
+          path: ${{ env.ARTIFACTS_DIR }}/**
+
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [ amd64, arm64 ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: build
+        run: |
+          set -euo pipefail
+          mkdir -p "$ARTIFACTS_DIR"
+          export GOOS=linux
+          export GOARCH=${{ matrix.arch }}
+          IFS=',' read -ra TARGETS <<< "${BUILD_TARGETS}"
+          for t_raw in "${TARGETS[@]}"; do
+            dir="$(echo "$t_raw" | xargs)"
+            bin=$(basename "$dir")
+            (cd "$dir" && go build -o "${GITHUB_WORKSPACE}/${ARTIFACTS_DIR}/" $LDFLAGS .)
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROJECT_NAME }}-linux-${{ matrix.arch }}
+          path: ${{ env.ARTIFACTS_DIR }}/**
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [ amd64, arm64 ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: build
+        run: |
+          set -euo pipefail
+          mkdir -p "$ARTIFACTS_DIR"
+          export GOOS=darwin
+          export GOARCH=${{ matrix.arch }}
+          IFS=',' read -ra TARGETS <<< "${BUILD_TARGETS}"
+          for t_raw in "${TARGETS[@]}"; do
+            dir="$(echo "$t_raw" | xargs)"
+            bin=$(basename "$dir")
+            (cd "$dir" && go build -o "${GITHUB_WORKSPACE}/${ARTIFACTS_DIR}/" $LDFLAGS .)
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROJECT_NAME }}-osx-${{ matrix.arch }}
+          path: ${{ env.ARTIFACTS_DIR }}/**

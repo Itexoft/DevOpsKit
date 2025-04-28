@@ -9,10 +9,9 @@ on:
       csproj_path:
         type: string
         required: true
-      build_workflow:
+      artifacts_run_id:
         type: string
         required: true
-        default: ""
       extra_paths:
         type: string
         required: false
@@ -36,7 +35,7 @@ on:
 env:
   NUGET_SOURCE: ${{ inputs.nuget_source }}
   CSPROJ_PATH: ${{ inputs.csproj_path }}
-  BUILD_WORKFLOW: ${{ inputs.build_workflow }}
+  ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
   PUBLISH_ENABLED: ${{ inputs.publish }}
   ARTIFACTS_DIR: artifacts
   PROJECT_NAME: ${{ inputs.project_name }}
@@ -52,25 +51,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: determine artifact run id
-        id: run_id
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            RID=$(gh api "/repos/${{ github.repository }}/actions/workflows/${{ env.BUILD_WORKFLOW }}.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')
-            [ -n "$RID" ] || { echo "::error::No successful ${{ env.BUILD_WORKFLOW }} runs found"; RID="none"; }
-          else
-            RID=${{ github.event.workflow_run.id }}
-          fi
-          echo "run_id=$RID" >> $GITHUB_OUTPUT
-
       - uses: actions/download-artifact@v4
-        if: steps.run_id.outputs.run_id != 'none'
         continue-on-error: true
         with:
           path: ${{ env.ARTIFACTS_DIR }}
-          run-id: ${{ steps.run_id.outputs.run_id }}
+          run-id: ${{ env.ARTIFACTS_RUN_ID }}
           github-token: ${{ github.token }}
 
       - name: Validate artifacts
@@ -120,6 +105,29 @@ jobs:
             echo "can_publish=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: collect rids
+        id: collect_rids
+        run: |
+          prefix="${{ env.PROJECT_NAME }}"
+          rids=""
+          for dir in ${{ env.ARTIFACTS_DIR }}/*; do
+            [ -d "$dir" ] || continue
+            base=$(basename "$dir")
+            [[ "$base" == "$prefix"-* ]] || continue
+            rid=${base#"$prefix"-}
+            rid=${rid,,}
+            rid=${rid//_/-}
+            rids="${rids}${rid},"
+          done
+          rids=${rids%,}
+          echo "rid_list=$rids" >> $GITHUB_OUTPUT
+
+      - name: map rids
+        id: map_rids
+        uses: ./.github/actions/nuget-map-rid
+        with:
+          rid: ${{ steps.collect_rids.outputs.rid_list }}
+
       - name: prepare
         run: |
           set -e
@@ -135,18 +143,18 @@ jobs:
           done
 
           prefix="${{ env.PROJECT_NAME }}"
+          IFS=',' read -ra mapped <<< "${{ steps.map_rids.outputs.nuget_rid }}"
+          idx=0
           mkdir -p pkg/runtimes
 
           for dir in ${{ env.ARTIFACTS_DIR }}/*; do
             [ -d "$dir" ] || continue
-            comp_json=("$dir"/*compile_commands.json)
-            [ -e "${comp_json[0]}" ] || continue
 
             base=$(basename "$dir")
             [[ "$base" == "$prefix"-* ]] || continue
-            rid=${base#"$prefix"-}
-            rid=${rid,,}
-            rid=${rid//_/-}
+            rid=${mapped[$idx]}
+            idx=$((idx+1))
+            [ -z "$rid" ] && continue
 
             native="pkg/runtimes/$rid/native"
             mkdir -p "$native"

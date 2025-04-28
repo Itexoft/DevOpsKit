@@ -1,0 +1,38 @@
+name: get-last-success-workflow-run-id
+
+on:
+  workflow_call:
+    inputs:
+      build_workflow:
+        type: string
+        required: true
+      branch:
+        type: string
+        required: true
+    outputs:
+      run_id:
+        value: ${{ jobs.determine.outputs.run_id }}
+
+jobs:
+  determine:
+    runs-on: ubuntu-latest
+    outputs:
+      run_id: ${{ steps.det.outputs.run_id }}
+    steps:
+      - name: determine run id
+        id: det
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.branch }}" ]; then
+            BRANCH="${{ inputs.branch }}"
+          else
+            BRANCH="${{ github.ref_name }}"
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RID=$(gh api "/repos/${{ github.repository }}/actions/workflows/${{ inputs.build_workflow }}.yml/runs?status=success&branch=$BRANCH&per_page=1" --jq '.workflow_runs[0].id')
+            [ -n "$RID" ] || { echo "::error::No successful run found"; exit 1; }
+          else
+            RID=${{ github.event.workflow_run.id }}
+          fi
+          echo "run_id=$RID" >> $GITHUB_OUTPUT
