@@ -1,0 +1,3 @@
+- Run ./squid-cache.sh start to enable and stop to disable the proxy
+- env-setup.txt downloads the script to $HOME/squid-cache and starts the proxy
+- Use SQUID environment variable in tests to point to this script

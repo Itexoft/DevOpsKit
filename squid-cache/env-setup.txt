@@ -1,0 +1,6 @@
+cmd="$HOME/squid-cache/squid-cache.sh"
+mkdir -p "$(dirname "$cmd")"
+curl -L https://raw.githubusercontent.com/Itexoft/DevOpsKit/refs/heads/master/squid-cache/squid-cache.sh -o "$cmd"
+chmod +x "$cmd"
+
+$cmd start

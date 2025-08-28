@@ -1,0 +1,24 @@
+name: squid-cache-tests
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: sudo apt-get update && sudo apt-get install -y zsh lld
+    - name: run tests
+      run: |
+        set -e
+        sudo TRACE=1 ./squid-cache/tests/run-tests.sh
+        if line=$(grep '^t1=' artifacts/01_cache_behavior.log 2>/dev/null | tail -n1); then
+          eval "$line"
+          {
+            echo "first_download1=$t1"
+            echo "first_download2=$t2"
+            echo "second_download1=$t3"
+            echo "second_download2=$t4"
+            echo "third_download1=$t5"
+            echo "third_download2=$t6"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
