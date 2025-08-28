@@ -128,7 +128,7 @@ jobs:
 
       - name: Map rids
         id: map_rids
-        uses: Itexoft/DevOpsKit/.github/actions/nuget-map-rid@master
+        uses: Itexoft/devops/.github/actions/nuget-map-rid@master
         with:
           rid_list: ${{ steps.collect_rids.outputs.rid_list }}
 

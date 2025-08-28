@@ -1,0 +1,132 @@
+name: Publish GitHub Package
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: false
+        type: string
+        default: master
+      run-id:
+        required: true
+        type: string
+      artifact-name:
+        required: true
+        type: string
+      version:
+        required: false
+        type: string
+      version-file:
+        required: false
+        type: string
+        default: VERSION
+      source:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      gh_token:
+        required: false
+      packages_token:
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce branch
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.branch }}" ] && [ "${GITHUB_REF_NAME}" != "${{ inputs.branch }}" ]; then
+            echo "::error::Publishing is allowed only from branch ${{ inputs.branch }} (current ${GITHUB_REF_NAME})"
+            exit 1
+          fi
+
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          if [ -z "${version}" ]; then
+            if [ ! -f "${{ inputs.version-file }}" ]; then echo "::error::VERSION file not found at ${{ inputs.version-file }}"; exit 1; fi
+            version=$(tr -d ' \t\r\n' < "${{ inputs.version-file }}")
+          fi
+          if [ -z "${version}" ]; then echo "::error::Version is empty"; exit 1; fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then echo "::error::Invalid version format: $version"; exit 1; fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs['run-id'] }}
+          name: ${{ inputs['artifact-name'] }}
+          path: nupkgs
+          github-token: ${{ secrets.gh_token || github.token }}
+
+      - name: Ensure assets exist
+        run: |
+          set -euo pipefail
+          if ! find nupkgs -type f | grep -q .; then
+            echo "::error::No files found to publish in nupkgs"
+            exit 1
+          fi
+
+      - name: Validate packages
+        id: meta
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mapfile -t pkgs < <(find nupkgs -type f -name '*.nupkg' | sort)
+          if [ "${#pkgs[@]}" -eq 0 ]; then echo "::error::No .nupkg found in artifacts"; exit 1; fi
+          ver="${{ steps.ver.outputs.value }}"
+          ids=()
+          for f in "${pkgs[@]}"; do
+            meta=$(unzip -p "$f" '*.nuspec' | tr -d '\n\r' || true)
+            if [ -z "$meta" ]; then echo "::error::Failed to read .nuspec from $f"; exit 1; fi
+            id=$(printf '%s' "$meta" | sed -n 's:.*<id>\([^<]*\)</id>.*:\1:p')
+            fv=$(printf '%s' "$meta" | sed -n 's:.*<version>\([^<]*\)</version>.*:\1:p')
+            if [ -z "$id" ] || [ -z "$fv" ]; then echo "::error::Missing <id> or <version> in $f"; exit 1; fi
+            if [ "$fv" != "$ver" ]; then echo "::error::Version mismatch: $f has $fv, expected $ver"; exit 1; fi
+            ids+=("$id")
+          done
+          printf "ids<<EOF\n" >> "$GITHUB_OUTPUT"
+          printf "%s\n" "${ids[@]}" | awk 'BEGIN{IGNORECASE=1}!seen[tolower($0)]++' >> "$GITHUB_OUTPUT"
+          printf "EOF\n" >> "$GITHUB_OUTPUT"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Configure GitHub Packages source
+        env:
+          TOKEN: ${{ secrets.packages_token || secrets.gh_token || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner="${{ github.repository_owner }}"
+          dotnet nuget remove source github || true
+          dotnet nuget add source "https://nuget.pkg.github.com/${owner}/index.json" -n github -u "${GITHUB_ACTOR}" -p "${TOKEN}" --store-password-in-clear-text
+
+      - name: Push packages to GitHub Packages
+        env:
+          TOKEN: ${{ secrets.packages_token || secrets.gh_token || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mapfile -t pkgs < <(find nupkgs -type f -name '*.nupkg' | sort)
+          if [ "${#pkgs[@]}" -eq 0 ]; then echo "::error::No .nupkg found to push"; exit 1; fi
+          for f in "${pkgs[@]}"; do
+            dotnet nuget push "$f" --source github -k "$TOKEN" --skip-duplicate
+          done

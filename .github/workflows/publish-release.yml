@@ -1,0 +1,130 @@
+name: Publish GitHub Release
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: false
+        type: string
+        default: master
+      run-id:
+        required: true
+        type: string
+      artifact-name:
+        required: true
+        type: string
+      tag:
+        required: false
+        type: string
+      tag-prefix:
+        required: false
+        type: string
+        default: v
+      version:
+        required: false
+        type: string
+      version-file:
+        required: false
+        type: string
+        default: VERSION
+      name:
+        required: false
+        type: string
+      body:
+        required: false
+        type: string
+      draft:
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        required: false
+        type: boolean
+        default: false
+      generate-notes:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      gh_token:
+        required: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce branch
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.branch }}" ] && [ "${GITHUB_REF_NAME}" != "${{ inputs.branch }}" ]; then
+            echo "::error::Publishing is allowed only from branch ${{ inputs.branch }} (current ${GITHUB_REF_NAME})"
+            exit 1
+          fi
+
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version and tag
+        id: meta
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          if [ -z "${version}" ]; then
+            if [ ! -f "${{ inputs.version-file }}" ]; then echo "::error::VERSION file not found at ${{ inputs.version-file }}"; exit 1; fi
+            version=$(tr -d ' \t\r\n' < "${{ inputs.version-file }}")
+          fi
+          if [ -z "${version}" ]; then echo "::error::Version is empty"; exit 1; fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then echo "::error::Invalid version format: $version"; exit 1; fi
+          tag="${{ inputs.tag }}"
+          if [ -z "${tag}" ]; then tag="${{ inputs.tag-prefix }}${version}"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag doesn't exist
+        env:
+          GH_TOKEN: ${{ secrets.gh_token || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "${{ steps.meta.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Release already exists for tag ${{ steps.meta.outputs.tag }}"
+            exit 1
+          fi
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs['run-id'] }}
+          name: ${{ inputs['artifact-name'] }}
+          path: release-assets
+          github-token: ${{ secrets.gh_token || github.token }}
+
+      - name: Ensure assets exist
+        run: |
+          set -euo pipefail
+          if ! find release-assets -type f | grep -q .; then
+            echo "::error::No files found to attach in release-assets"
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.gh_token || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          title="${{ inputs.name }}"
+          if [ -z "${title}" ]; then title="Release ${{ steps.meta.outputs.tag }}"; fi
+          flags=()
+          if [ "${{ inputs.generate-notes }}" = "true" ] && [ -z "${{ inputs.body }}" ]; then
+            flags+=(--generate-notes)
+          fi
+          if [ -n "${{ inputs.body }}" ]; then
+            flags+=(--notes "${{ inputs.body }}")
+          fi
+          if [ "${{ inputs.draft }}" = "true" ]; then flags+=(--draft); fi
+          if [ "${{ inputs.prerelease }}" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "${{ steps.meta.outputs.tag }}" release-assets/** -t "${title}" "${flags[@]}"

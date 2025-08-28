@@ -2,7 +2,7 @@
 
 Contributor: Denis Kudelin
 
-Source Code: https://github.com/Itexoft/DevOpsKit
+Source Code: https://github.com/Itexoft/devops
 
 ## Purpose
 

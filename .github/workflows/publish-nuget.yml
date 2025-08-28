@@ -1,0 +1,144 @@
+name: Publish NuGet Package
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: false
+        type: string
+        default: master
+      run-id:
+        required: true
+        type: string
+      artifact-name:
+        required: true
+        type: string
+      version:
+        required: false
+        type: string
+      version-file:
+        required: false
+        type: string
+        default: VERSION
+      source:
+        required: false
+        type: string
+        default: https://api.nuget.org/v3/index.json
+    secrets:
+      nuget_api_key:
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce branch
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.branch }}" ] && [ "${GITHUB_REF_NAME}" != "${{ inputs.branch }}" ]; then
+            echo "::error::Publishing is allowed only from branch ${{ inputs.branch }} (current ${GITHUB_REF_NAME})"
+            exit 1
+          fi
+
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          if [ -z "${version}" ]; then
+            if [ ! -f "${{ inputs.version-file }}" ]; then echo "::error::VERSION file not found at ${{ inputs.version-file }}"; exit 1; fi
+            version=$(tr -d ' \t\r\n' < "${{ inputs.version-file }}")
+          fi
+          if [ -z "${version}" ]; then echo "::error::Version is empty"; exit 1; fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then echo "::error::Invalid version format: $version"; exit 1; fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs['run-id'] }}
+          name: ${{ inputs['artifact-name'] }}
+          path: nupkgs
+          github-token: ${{ github.token }}
+
+      - name: Validate packages
+        id: meta
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mapfile -t pkgs < <(find nupkgs -type f -name '*.nupkg' | sort)
+          if [ "${#pkgs[@]}" -eq 0 ]; then echo "::error::No .nupkg found in artifacts"; exit 1; fi
+          ver="${{ steps.ver.outputs.value }}"
+          ids=()
+          for f in "${pkgs[@]}"; do
+            meta=$(unzip -p "$f" '*.nuspec' | tr -d '\n\r' || true)
+            if [ -z "$meta" ]; then echo "::error::Failed to read .nuspec from $f"; exit 1; fi
+            id=$(printf '%s' "$meta" | sed -n 's:.*<id>\([^<]*\)</id>.*:\1:p')
+            fv=$(printf '%s' "$meta" | sed -n 's:.*<version>\([^<]*\)</version>.*:\1:p')
+            if [ -z "$id" ] || [ -z "$fv" ]; then echo "::error::Missing <id> or <version> in $f"; exit 1; fi
+            if [ "$fv" != "$ver" ]; then echo "::error::Version mismatch: $f has $fv, expected $ver"; exit 1; fi
+            ids+=("$id")
+          done
+          printf "ids<<EOF\n" >> "$GITHUB_OUTPUT"
+          printf "%s\n" "${ids[@]}" | awk 'BEGIN{IGNORECASE=1}!seen[tolower($0)]++' >> "$GITHUB_OUTPUT"
+          printf "EOF\n" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure version not present on NuGet
+        run: |
+          set -euo pipefail
+          ver="${{ steps.ver.outputs.value }}"
+          while read -r pkg; do
+            [ -z "$pkg" ] && continue
+            lower=$(printf '%s' "$pkg" | tr '[:upper:]' '[:lower:]')
+            url="https://api.nuget.org/v3-flatcontainer/${lower}/index.json"
+            code=0
+            json=$(curl -fsSL "$url" || code=$?)
+            if [ "$code" -ne 0 ] || [ -z "${json:-}" ]; then
+              continue
+            fi
+            if printf '%s' "$json" | tr -d '\n\r ' | grep -iq "\"${ver}\""; then
+              echo "::error::NuGet already has ${pkg} ${ver}"
+              exit 1
+            fi
+          done <<< "${{ steps.meta.outputs.ids }}"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Push packages
+        env:
+          NUGET_API_KEY: ${{ secrets.nuget_api_key }}
+          SOURCE: ${{ inputs.source }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mapfile -t pkgs < <(find nupkgs -type f -name '*.nupkg' | sort)
+          if [ "${#pkgs[@]}" -eq 0 ]; then echo "::error::No .nupkg found to push"; exit 1; fi
+          for f in "${pkgs[@]}"; do
+            dotnet nuget push "$f" -k "$NUGET_API_KEY" -s "$SOURCE" --skip-duplicate
+          done
+
+      - name: Push symbol packages
+        env:
+          NUGET_API_KEY: ${{ secrets.nuget_api_key }}
+          SOURCE: https://api.nuget.org/v3/index.json
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mapfile -t snupkgs < <(find nupkgs -type f -name '*.snupkg' | sort)
+          for f in "${snupkgs[@]}"; do
+            dotnet nuget push "$f" -k "$NUGET_API_KEY" -s "$SOURCE" --skip-duplicate
+          done
